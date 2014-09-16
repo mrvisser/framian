@@ -75,12 +75,20 @@ trait Frame[Row, Col] {
   /**
    * Returns the set of all unique column keys.
    */
-  def colKeys: Set[Col] = colIndex.map(_._1)(collection.breakOut)
+  def colKeys: Set[Col] = {
+    val builder = Set.newBuilder[Col]
+    colIndex.foreachKeys(builder += _)
+    builder.result()
+  }
 
   /**
    * Returns the set of all unique row keys.
    */
-  def rowKeys: Set[Row] = rowIndex.map(_._1)(collection.breakOut)
+  def rowKeys: Set[Row] = {
+    val builder = Set.newBuilder[Row]
+    rowIndex.foreachKeys(builder += _)
+    builder.result()
+  }
 
   /**
    * Returns the number of rows in this frame.
@@ -197,26 +205,26 @@ trait Frame[Row, Col] {
    * Removes rows whose row key is true for the predicate `p`.
    */
   def filterRowKeys(p: Row => Boolean) =
-    withRowIndex(rowIndex.filter { case (row, _) => p(row) })
+    withRowIndex(rowIndex.filter(p))
 
   /**
    * Removes rows whose row key is true for the predicate `p`.
    */
   def filterColKeys(p: Col => Boolean) =
-    withColIndex(colIndex.filter { case (col, _) => p(col) })
+    withColIndex(colIndex.filter(p))
 
   /**
    * Map the row index using `f`. This retains the traversal order of the rows.
    */
   def mapRowKeys[R: Order: ClassTag](f: Row => R): Frame[R, Col] =
-    this.withRowIndex(rowIndex.map { case (k, v) => (f(k), v) })
+    this.withRowIndex(rowIndex.map(f))
 
   /**
    * Map the column index using `f`. This retains the traversal order of the
    * columns.
    */
   def mapColKeys[C: Order: ClassTag](f: Col => C): Frame[Row, C] =
-    this.withColIndex(colIndex.map { case (k, v) => (f(k), v) })
+    this.withColIndex(colIndex.map(f))
 
   /**
    * Retain only the cols in `cols`, dropping all others.
@@ -505,8 +513,8 @@ trait Frame[Row, Col] {
       val cols1 = that.columnsAsSeries
       val rowIndex0 = this.rowIndex
       val rowIndex1 = that.rowIndex
-      val keys0 = rowIndex0 map (_._1)
-      val keys1 = rowIndex1 map (_._1)
+      val keys0 = rowIndex0.iterator.map(_._1).toList
+      val keys1 = rowIndex1.iterator.map(_._1).toList
       (cols0.size == cols1.size) && (keys0 == keys1) && (cols0.iterator zip cols1.iterator).forall {
         case ((k0, v0), (k1, v1)) if k0 == k1 =>
           def col0 = v0.getOrElse(UntypedColumn.empty).cast[Any]
@@ -547,7 +555,7 @@ trait Frame[Row, Col] {
       header :: loop(keys.tail, cols map (_.tail), Nil)
     }
 
-    val keys = justify("" :: rowIndex.map(_._1.toString).toList)
+    val keys = justify("" :: rowIndex.iterator.map(_._1.toString).toList)
     val cols = columnsAsSeries.iterator.map { case (key, cell) =>
       val header = key.toString
       val col = cell.getOrElse(UntypedColumn.empty).cast[Any]

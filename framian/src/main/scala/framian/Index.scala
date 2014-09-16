@@ -23,7 +23,6 @@ package framian
 
 import scala.reflect.ClassTag
 import scala.annotation.tailrec
-import scala.collection.{ IterableLike, Iterable }
 import scala.collection.generic.CanBuildFrom
 import scala.collection.mutable
 
@@ -33,8 +32,7 @@ import spire.math.Searching
 import spire.syntax.order._
 import spire.syntax.cfor._
 
-sealed abstract class Index[K](implicit val order: Order[K], val classTag: ClassTag[K])
-    extends Iterable[(K, Int)] with IterableLike[(K, Int), Index[K]] {
+sealed abstract class Index[K](implicit val order: Order[K], val classTag: ClassTag[K]) {
 
   /**
    * Returns an empty `Index` with the same key type as this.
@@ -72,12 +70,19 @@ sealed abstract class Index[K](implicit val order: Order[K], val classTag: Class
    * pair for its side-effects.
    */
   def foreach[U](f: (K, Int) => U): Unit
+  def foreach[U](f: ((K, Int)) => U): Unit = foreach(Function.untupled(f))
+  def foreachKeys[U](f: K => U): Unit
+  def foreachIndices[U](f: Int => U): Unit
 
-  @tailrec private def findStart(k: K, i: Int): Int =
+  def map[L: Order: ClassTag](f: K => L): Index[L]
+
+  def filter(p: K => Boolean): Index[K]
+
+  @tailrec protected final def findStart(k: K, i: Int): Int =
     if (i > 0 && keys(i - 1) === k) findStart(k, i - 1)
     else i
 
-  @tailrec private def findEnd(k: K, i: Int): Int =
+  @tailrec protected final def findEnd(k: K, i: Int): Int =
     if (i < keys.length && keys(i) === k) findEnd(k, i + 1)
     else i
 
@@ -113,6 +118,8 @@ sealed abstract class Index[K](implicit val order: Order[K], val classTag: Class
     val i = search(k)
     if (i >= 0) Some(i) else None
   }
+
+  def from(k: K): Index[K]
 
   /**
    * Returns an index with just the key/row pairs whose key is `k`. If there
@@ -184,13 +191,8 @@ sealed abstract class Index[K](implicit val order: Order[K], val classTag: Class
   // These must contain both the keys and the indices, in sorted order.
   private[framian] def keys: Array[K]
   private[framian] def indices: Array[Int]
-  private[framian] def withIndices(is: Array[Int]): Index[K]
 
-  override def foreach[U](f: ((K, Int)) => U): Unit = foreach(Function.untupled(f))
-
-  override def seq: Index[K] = this
-
-  override protected def newBuilder: mutable.Builder[(K, Int), Index[K]] =
+  protected def newBuilder: mutable.Builder[(K, Int), Index[K]] =
     new Index.IndexBuilder
 
   override def equals(that: Any): Boolean = that match {
@@ -212,7 +214,7 @@ sealed abstract class Index[K](implicit val order: Order[K], val classTag: Class
   }
 
   override def hashCode: Int =
-    to[Vector].hashCode * 677
+    iterator.to[Vector].hashCode * 677
 }
 
 object Index {
@@ -441,21 +443,60 @@ final class UnorderedIndex[K: Order: ClassTag] private[framian] (
 
   override def size: Int = keys.size
 
-  def keyAt(i: Int): K = keys(ord(i))
-  def indexAt(i: Int): Int = indices(ord(i))
+  override def keyAt(i: Int): K = keys(ord(i))
 
-  def iterator: Iterator[(K, Int)] = ord.iterator map { i =>
+  override def indexAt(i: Int): Int = indices(ord(i))
+
+  override def iterator: Iterator[(K, Int)] = ord.iterator map { i =>
     (keys(i), indices(i))
   }
 
-  def foreach[U](f: (K, Int) => U): Unit = {
+  override def foreachKeys[U](f: K => U): Unit =
+    cfor(0)(_ < ord.length, _ + 1)((i) => f(keys(ord(i))))
+
+  override def foreachIndices[U](f: Int => U): Unit =
+    cfor(0)(_ < ord.length, _ + 1)((i) => f(indices(ord(i))))
+
+  override def foreach[U](f: (K, Int) => U): Unit = {
     cfor(0)(_ < ord.length, _ + 1) { i =>
       val j = ord(i)
       f(keys(j), indices(j))
     }
   }
 
-  def resetIndices: Index[K] = {
+  override def map[L: Order: ClassTag](f: K => L): Index[L] = {
+    val mappedKeys = new Array[L](keys.length)
+    cfor(0)(_ < ord.length, _ + 1) { i =>
+      val j = ord(i)
+      mappedKeys(j) = f(keys(j))
+    }
+    new UnorderedIndex(mappedKeys, indices, ord)
+  }
+
+  override def filter(p: K => Boolean): Index[K] = {
+    val keyBuilder = Array.newBuilder[K]
+    val indicesBuilder = Array.newBuilder[Int]
+    cfor(0)(_ < ord.length, _ + 1) { i =>
+      val j = ord(i)
+      val key = keys(j)
+      if (p(key)) {
+        keyBuilder += key
+        indicesBuilder += indices(j)
+      }
+    }
+    Index.unordered(keyBuilder.result(), indicesBuilder.result())
+  }
+
+  override def from(k: K): Index[K] = {
+    val i = search(k)
+    if (i < 0) {
+      slice(-i - 1, keys.length)
+    } else {
+      slice(findStart(k, i), keys.length)
+    }
+  }
+
+  override def resetIndices: Index[K] = {
     val indices = new Array[Int](keys.length)
     cfor(0)(_ < ord.length, _ + 1) { i =>
       indices(ord(i)) = i
@@ -463,7 +504,7 @@ final class UnorderedIndex[K: Order: ClassTag] private[framian] (
     new UnorderedIndex(keys, indices, ord)
   }
 
-  def unzip: (Array[K], Array[Int]) = {
+  override def unzip: (Array[K], Array[Int]) = {
     val ks = new Array[K](ord.length)
     val is = new Array[Int](ord.length)
     cfor(0)(_ < ord.length, _ + 1) { i =>
@@ -474,10 +515,19 @@ final class UnorderedIndex[K: Order: ClassTag] private[framian] (
     (ks, is)
   }
 
-  def isOrdered = false
+  override def isOrdered = false
 
-  private[framian] def withIndices(is: Array[Int]): Index[K] =
-    new UnorderedIndex(keys, is, ord)
+  private def slice(from: Int, to: Int): Index[K] = {
+    val slicedOrd = ord.slice(from, to)
+    val slicedKeys = new Array[K](to - from)
+    val slicedIndices = new Array[Int](to - from)
+    cfor(0)(_ < slicedOrd.length, _ + 1) { i =>
+      slicedKeys(ord(i)) = keys(i)
+      slicedIndices(ord(i)) = indices(i)
+    }
+
+    new UnorderedIndex(slicedKeys, slicedIndices, slicedOrd)
+  }
 }
 
 final class OrderedIndex[K: Order: ClassTag] private[framian] (
@@ -486,25 +536,68 @@ final class OrderedIndex[K: Order: ClassTag] private[framian] (
     extends Index[K] {
 
   override def size: Int = keys.size
-  def keyAt(i: Int): K = keys(i)
-  def indexAt(i: Int): Int = indices(i)
-  def iterator: Iterator[(K, Int)] = Iterator.tabulate(keys.length) { i =>
+
+  override def keyAt(i: Int): K = keys(i)
+
+  override def indexAt(i: Int): Int = indices(i)
+
+  override def iterator: Iterator[(K, Int)] = Iterator.tabulate(keys.length) { i =>
     (keys(i), indices(i))
   }
-  def foreach[U](f: (K, Int) => U): Unit = {
+
+  override def foreachKeys[U](f: K => U): Unit = {
+    cfor(0)(_ < keys.length, _ + 1)((i) => f(keys(i)))
+  }
+
+  override def foreachIndices[U](f: Int => U): Unit = {
+    cfor(0)(_ < keys.length, _ + 1)((i) => f(indices(i)))
+  }
+
+  override def foreach[U](f: (K, Int) => U): Unit = {
     cfor(0)(_ < keys.length, _ + 1) { i =>
       f(keys(i), indices(i))
     }
   }
-  def resetIndices: Index[K] =
+
+  override def map[L: Order: ClassTag](f: K => L): Index[L] = {
+    val mappedKeys = new Array[L](keys.size)
+    cfor(0)(_ < keys.length, _ + 1) { i =>
+      mappedKeys(i) = f(keys(i))
+    }
+    new OrderedIndex(mappedKeys, indices)
+  }
+
+  override def filter(p: K => Boolean): Index[K] = {
+    val keysBuilder = Array.newBuilder[K]
+    val indicesBuilder = Array.newBuilder[Int]
+    cfor(0)(_ < keys.length, _ + 1) { i =>
+      val key = keys(i)
+      if (p(key)) {
+        keysBuilder += key
+        indicesBuilder += indices(i)
+      }
+    }
+    new OrderedIndex(keysBuilder.result(), indicesBuilder.result())
+  }
+
+  override def from(k: K): Index[K] = {
+    val i = search(k)
+    if (i < 0) {
+      slice(-i - 1, keys.length)
+    } else {
+      slice(findStart(k, i), keys.length)
+    }
+  }
+
+  override def resetIndices: Index[K] =
     new OrderedIndex(keys, Array.range(0, keys.size))
 
-  def unzip: (Array[K], Array[Int]) = (keys.clone(), indices.clone())
+  override def unzip: (Array[K], Array[Int]) = (keys.clone(), indices.clone())
 
-  def isOrdered = true
+  override def isOrdered = true
 
-  private[framian] def withIndices(is: Array[Int]): Index[K] =
-    new OrderedIndex(keys, is)
+  private def slice(from: Int, to: Int): Index[K] =
+    new OrderedIndex(keys.slice(from, to), indices.slice(from, to))
 
   lazy val isSequential: Boolean = {
     var isSeq = true

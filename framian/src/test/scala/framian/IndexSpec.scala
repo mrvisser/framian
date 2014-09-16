@@ -4,12 +4,9 @@ import org.specs2.mutable._
 import org.specs2.ScalaCheck
 
 import scala.reflect.ClassTag
-import scala.collection.mutable.ArrayBuilder
+import scala.collection.mutable
 
-import spire.algebra._
 import spire.std.string._
-import spire.std.int._
-import spire.syntax.monoid._
 
 class IndexSpec extends Specification with ScalaCheck {
   import IndexGenerators._
@@ -67,7 +64,7 @@ class IndexSpec extends Specification with ScalaCheck {
 
     "foreach iterates in order" in {
       val idx = Index("c" -> 1, "a" -> 3, "b" -> 2)
-      val bldr = ArrayBuilder.make[(String, Int)]
+      val bldr = mutable.ArrayBuilder.make[(String, Int)]
       idx foreach { (k, i) =>
         bldr += (k -> i)
       }
@@ -106,6 +103,10 @@ class IndexSpec extends Specification with ScalaCheck {
     "be equal only if key/row pairs are equal" ! check {
       (idx0: Index[String], idx1: Index[String]) => 
         (idx0 == idx1) must_== (idx0.to[Vector] == idx1.to[Vector])
+    }
+
+    "from returns empty index on an empty index" in {
+      Index.empty[String].from("test") must_== Index.empty[String]
     }
   }
 

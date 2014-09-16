@@ -37,7 +37,7 @@ import framian.columns.MappedColumn
 import framian.reduce.Reducer
 import framian.util.TrivialMetricSpace
 
-final class Series[K,V](val index: Index[K], val column: Column[V]) {
+final class Series[K, V](val index: Index[K], val column: Column[V]) {
 
   private implicit def classTag = index.classTag
   private implicit def order = index.order
@@ -96,12 +96,8 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     * @see [[foreachKeys]]
     * @see [[foreachValues]]
     */
-  def foreach[U](f: (K, Cell[V]) => U): Unit = {
-    cfor(0)(_ < index.size, _ + 1) { i =>
-      f(index.keyAt(i), column(index.indexAt(i)))
-    }
-  }
-
+  def foreach[U](f: (K, Cell[V]) => U): Unit =
+    index.foreach((key, row) => f(key, column(row)))
 
   /** Applies a function `f` to all key-value pairs of the series.
     *
@@ -119,11 +115,8 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     * @see [[foreachValues]]
     */
   def foreachDense[U](f: (K, V) => U): Unit = {
-    cfor(0)(_ < index.size, _ + 1) { i =>
-      val ix = index.indexAt(i)
-      if (column.isValueAt(ix)) {
-        f(index.keyAt(i), column.valueAt(ix))
-      }
+    index.foreach { (key, row) =>
+      column(row).foreach(f(key, _))
     }
   }
 
@@ -141,9 +134,7 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     * @see [[foreachValues]]
     */
   def foreachKeys[U](f: K => U): Unit = {
-    cfor(0)(_ < index.size, _ + 1) { i =>
-      f(index.keyAt(i))
-    }
+    index.foreachKeys(f)
   }
 
 
@@ -160,9 +151,7 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     * @see [[foreachValues]]
     */
   def foreachCells[U](f: Cell[V] => U): Unit = {
-    cfor(0)(_ < index.size, _ + 1) { i =>
-      f(column(index.indexAt(i)))
-    }
+    index.foreachIndices((row) => f(column(row)))
   }
 
 
@@ -182,11 +171,8 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     * @see [[foreachKeys]]
     */
   def foreachValues[U](f: V => U): Unit = {
-    cfor(0)(_ < index.size, _ + 1) { i =>
-      val ix = index.indexAt(i)
-      if (column.isValueAt(ix)) {
-        f(column.valueAt(ix))
-      }
+    index.foreachIndices { (row) =>
+      column(row).foreach(f)
     }
   }
 
@@ -198,9 +184,8 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     */
   def keys: Vector[K] = {
     val builder = Vector.newBuilder[K]
-    cfor(0)(_ < index.size, _ + 1) { i =>
-      builder += index.keyAt(i)
-    }
+    builder.sizeHint(size)
+    index.foreachKeys(builder += _)
     builder.result()
   }
 
@@ -216,9 +201,8 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     */
   def cells: Vector[Cell[V]] = {
     val builder = Vector.newBuilder[Cell[V]]
-    cfor(0)(_ < index.size, _ + 1) { i =>
-      builder += column(index.indexAt(i))
-    }
+    builder.sizeHint(size)
+    foreachCells(builder += _)
     builder.result()
   }
 
@@ -242,15 +226,10 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     */
   def values: Vector[V] = {
     val builder = Vector.newBuilder[V]
-    cfor(0)(_ < index.size, _ + 1) { i =>
-      val ix = index.indexAt(i)
-      if (column.isValueAt(ix)) {
-        builder += column.valueAt(ix)
-      }
-    }
+    builder.sizeHint(size)
+    foreachValues(builder += _)
     builder.result()
   }
-
 
   @inline
   def keyAt(i: Int): K = index.keyAt(i)
@@ -267,16 +246,22 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
   /**
    * Returns all cells with with key of `key`.
    */
-  def getCells(key: K): Vector[Cell[V]] =
-    index.getAll(key).map { case (_, row) => column(row) } (collection.breakOut)
+  def getCells(key: K): Vector[Cell[V]] = {
+    val builder = Vector.newBuilder[Cell[V]]
+    builder.sizeHint(size)
+    index.getAll(key).foreachIndices(builder += column(_))
+    builder.result()
+  }
 
   /**
    * Returns all values with with key of `key`.
    */
-  def getValues(key: K): Vector[V] =
-    index.getAll(key).collect {
-      case (_, row) if column.isValueAt(row) => column.valueAt(row)
-    } (collection.breakOut)
+  def getValues(key: K): Vector[V] = {
+    val builder = Vector.newBuilder[V]
+    builder.sizeHint(size)
+    index.getAll(key).foreachIndices(column(_).foreach(builder += _))
+    builder.result()
+  }
 
   /**
    * Returns `true` if at least 1 value exists in this series. A series with
@@ -339,6 +324,7 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
    */
   def ++[VV >: V: ClassTag](that: Series[K, VV]): Series[K, VV] = {
     val bldr = Series.newUnorderedBuilder[K, VV]
+    bldr.sizeHint(size + that.size)
     this.foreach(bldr.append)
     that.foreach(bldr.append)
     bldr.result()
@@ -441,15 +427,19 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
    * Map the keys of this series. This will maintain the same iteration order
    * as the old series.
    */
-  def mapKeys[L: Order: ClassTag](f: K => L): Series[L, V] =
-    Series(index.map { case (k, i) => f(k) -> i }, column)
+  def mapKeys[L: Order: ClassTag](f: K => L)(implicit tt: ClassTag[V]): Series[L, V] = {
+    val builder = Series.newBuilder[L, V](index.isOrdered)
+    builder.sizeHint(size)
+    foreach(builder += f(_) -> _)
+    builder.result()
+  }
 
   /**
    * Map the values of this series only. Note that the function `f` will be
    * called every time a value is accessed. To prevent this, you must `compact`
    * the Series.
    */
-  def mapValues[W](f: V => W): Series[K, W] =
+  def mapValues[W: ClassTag](f: V => W): Series[K, W] =
     Series(index, new MappedColumn(f, column)) // TODO: Use a macro here?
 
   /**
@@ -458,8 +448,9 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
    */
   def mapValuesWithKeys[W: ClassTag](f: (K, V) => W): Series[K, W] = {
     val bldr = Column.builder[W]
-    index.foreach { (k, row) =>
-      bldr += column(row).map(v => f(k, v))
+    bldr.sizeHint(size)
+    foreach { (key, cell) =>
+      bldr += cell.map(f(key, _))
     }
     Series(index.resetIndices, bldr.result())
   }
@@ -469,9 +460,8 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
    */
   def cellMap[W: ClassTag](f: Cell[V] => Cell[W]): Series[K, W] = {
     val bldr = Column.builder[W]
-    index.foreach { (k, row) =>
-      bldr += f(column(row))
-    }
+    bldr.sizeHint(size)
+    foreachCells(bldr += f(_))
     Series(index.resetIndices, bldr.result())
   }
 
@@ -480,9 +470,8 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
    */
   def cellMapWithKeys[W: ClassTag](f: (K, Cell[V]) => Cell[W]): Series[K, W] = {
     val bldr = Column.builder[W]
-    index.foreach { (k, row) =>
-      bldr += f(k, column(row))
-    }
+    bldr.sizeHint(size)
+    foreach(bldr += f(_, _))
     Series(index.resetIndices, bldr.result())
   }
 
@@ -500,11 +489,10 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     */
   def filterEntries(p: (K, Cell[V]) => Boolean)(implicit ev: ClassTag[V]): Series[K, V] = {
     val b = Series.newBuilder[K, V](index.isOrdered)
-    b.sizeHint(index.size)
-    for ((k, ix) <- index) {
-      val cell = column(ix)
-      if (p(k, cell)) {
-        b.append(k, cell)
+    b.sizeHint(size)
+    foreach { (key, cell) =>
+      if (p(key, cell)) {
+        b.append(key, cell)
       }
     }
     b.result()
@@ -530,7 +518,10 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     */
   def filterByKeys(p: K => Boolean)(implicit ev: ClassTag[V]): Series[K, V] = {
     val b = Series.newBuilder[K, V](index.isOrdered)
-    b.sizeHint(this.size)
+    b.sizeHint(size)
+
+    // Access the index directly in order to avoid the `column(index.indexAt(i))`
+    // look-up unless we're accepting this key
     cfor(0)(_ < index.size, _ + 1) { i =>
       val k = index.keyAt(i)
       if (p(k)) {
@@ -560,7 +551,10 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     */
   def filterByCells(p: Cell[V] => Boolean)(implicit ev: ClassTag[V]): Series[K, V] = {
     val b = Series.newBuilder[K, V](index.isOrdered)
-    b.sizeHint(this.size)
+    b.sizeHint(size)
+
+    // Access the index directly in order to avoid the `index.keyAt(i)` look-up
+    // unless we're accepting this key
     cfor(0)(_ < index.size, _ + 1) { i =>
       val cell = column(index.indexAt(i))
       if (p(cell)) {
@@ -596,7 +590,7 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     */
   def filterByValues(p: V => Boolean)(implicit ev: ClassTag[V]): Series[K, V] = {
     val b = Series.newBuilder[K, V](index.isOrdered)
-    b.sizeHint(this.size)
+    b.sizeHint(size)
     cfor(0)(_ < index.size, _ + 1) { i =>
       val ix = index.indexAt(i)
       if (column.isValueAt(ix)) {
@@ -1087,8 +1081,9 @@ final class Series[K,V](val index: Index[K], val column: Column[V]) {
     case _ => false
   }
 
-  override def hashCode: Int =
-    index.map { case (k, i) => (k, column(i)) }.hashCode
+  override def hashCode: Int = {
+    iterator.to[Vector].hashCode * 677
+  }
 }
 
 object Series {
